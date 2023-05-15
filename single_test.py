@@ -11,47 +11,48 @@ import torchvision.models as torchvision_models
 from PIL import Image
 from selenium import webdriver
 import time
-from facaformer import FACAFormer
+from checkpoint.model import ARTransformer
 
 torch.set_printoptions(precision=8)
+
 
 parser = argparse.ArgumentParser(description='PyTorch Testing')
 
 parser.add_argument('--num_classes1', default=100, type=int,
-                    metavar='N', help='the number of milestone labels')
+                    metavar='N', help='the number of position labels')
 parser.add_argument('--num_classes2', default=2, type=int,
                     metavar='N', help='the number of angle labels (latitude and longitude)')
 parser.add_argument('--len', default=6, type=int,
                     metavar='LEN', help='the number of model input sequence length')
 
-parser.add_argument('--resume', default='checkpoint/model_angle_avg_best.pth.tar', type=str,
+parser.add_argument('--resume', default='save11/model_angle_avg_best.pth.tar', type=str,
                     metavar='PATH', help='path to latest checkpoint (default: none)')
 
-parser.add_argument('--start_path', default=["74551/30.3093714,119.9232729.png"],
+parser.add_argument('--start_path', default=[""],
                     type=list,
                     metavar='PATH',
-                    help='the frame path of initial position')
-parser.add_argument('--dest_path', default="74551/30.2620077,119.947846.png",
+                    help='the frame path of the start point')
+parser.add_argument('--dest_path', default="",
                     type=str,
                     metavar='PATH',
-                    help='the frame path of destination')
+                    help='the frame path of the end point ')
 parser.add_argument('--next_angles', default=[],
                     type=list,
                     metavar='ANGLE',
                     help='input angle sequence')
-parser.add_argument('--last_pos', default=[30.3093714, 119.9232729],
+parser.add_argument('--last_pos', default=[],
                     type=list,
                     metavar='ANGLE',
                     help='last position: lat and lon')
-parser.add_argument('--dest_pos', default=[30.2620077, 119.947846],
+parser.add_argument('--dest_pos', default=[],
                     type=list,
                     metavar='ANGLE',
-                    help='destination position: lat and lon')
+                    help='the end point position: lat and lon')
 
 
 def main():
     """
-    real-time testing process control: loading model, dataset, screenshot.
+    realistic testing process control: loading model, dataset, screenshot.
     :return:
     """
     args = parser.parse_args()
@@ -60,7 +61,7 @@ def main():
     print("=> creating model")
     backbone = torchvision_models.mobilenet_v3_small(pretrained=True)
 
-    model = FACAFormer(
+    model = ARTransformer(
         backbone=backbone,
         extractor_dim=576,
         num_classes1=args.num_classes1,
@@ -113,8 +114,8 @@ def main():
         transforms.ToTensor(),
         normalize,
     ])
-    # real-time testing
-    real_time_test(val_transform, model, args)
+    # realistic testing
+    realistic_test(val_transform, model, args)
 
 
 def generate_inputs(val_transform, args):
@@ -142,7 +143,7 @@ def generate_inputs(val_transform, args):
             next_imgs = torch.cat((next_imgs, img), dim=0)
     next_angles.append([0, 0])
 
-    # append destination frame angle destination angle as part of model input
+    # append the end point as part of model input
     dest_img = Image.open(args.dest_path)
     dest_img = dest_img.convert('RGB')
     dest_img = val_transform(dest_img).unsqueeze(dim=0)
@@ -161,15 +162,16 @@ def generate_inputs(val_transform, args):
     return next_imgs.unsqueeze(dim=0), next_angles.unsqueeze(dim=0)
 
 
-def real_time_test(val_transform, model, args):
+def realistic_test(val_transform, model, args):
     """
-    real-time testing process.
+    realistic testing process of a route.
     :param val_transform: torchvision.transforms.
     :param model: saved checkpoint.
     :param args:
-    :return: actually arrived destination.
+    :return: final coordinates.
     """
     for i in range(0, 220):
+        # load model input
         images, next_angles = generate_inputs(val_transform, args)
 
         # switch to evaluate mode
@@ -184,13 +186,13 @@ def real_time_test(val_transform, model, args):
             # b,len,3,224,224+b,len,2
             output1, output2, output3 = model(images, next_angles)
             _, preds = output1.max(1)
-            print("the current milestone: " + str(preds.item()))
+            print("the current candidates: " + str(preds.item()))
             _, preds = output2.max(1)
-            print("the next target milestone: " + str(preds.item()))
+            print("the next target candidates: " + str(preds.item()))
             output3 = output3.view(-1).numpy().tolist()
             print("the next steering angle: " + str(output3[0]) + "," + str(output3[1]))
 
-            # calculate the next steering angle
+            # calculate the direction angle at the next time
             tan = output3[0] / output3[1]
             ang = math.atan(tan) * 180 / math.pi
             if output3[0] >= 0 and output3[1] <= 0:
@@ -198,7 +200,7 @@ def real_time_test(val_transform, model, args):
             elif output3[0] <= 0 and output3[1] <= 0:
                 ang -= 180
 
-            # calculate the moving distance
+            # calculate the moving distance at the next time
             dis = 30
             print("dis:" + str(dis))
             lat_delta = dis * output3[0]
@@ -206,7 +208,7 @@ def real_time_test(val_transform, model, args):
             lat_delta = float(lat_delta / 111000)
             lon_delta = float(lon_delta / 111000 / math.cos(args.last_pos[0] / 180 * math.pi))
 
-            # calculate the new position
+            # calculate the new position at the next time
             new_lat = args.last_pos[0] + lat_delta
             new_lon = args.last_pos[1] + lon_delta
             print("new_lat: " + str(new_lat))
@@ -227,10 +229,10 @@ def real_time_test(val_transform, model, args):
                 args.start_path.pop(0)
                 args.next_angles.pop(0)
 
-            # If the distance errors of longitude and latitude are both within 20 meters,
-            # it means that we have reached the destination.
+            # If the distance errors of longitude and latitude are both within 20 m,
+            # it means that we have reached the end point.
             if abs(new_lat - args.dest_pos[0]) * 111000 <= 20 and \
-                abs(new_lon - args.dest_pos[1]) * 111000 * math.cos(args.last_pos[0]) <= 20:
+                abs(new_lon - args.dest_pos[1]) * 111000 * math.cos(args.last_pos[0] / 180 * math.pi) <= 20:
                 print("You reach the destination successfully!")
                 break
 
